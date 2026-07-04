@@ -28,21 +28,22 @@ class NegotiationCreateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # determine receiver
+        # determine sender and receiver
         if request.user == job.customer:
-            receiver = job.rider.user if job.rider else None
+            existing = Negotiation.objects.filter(job=job).order_by('-created_at').first()
+            if existing:
+                receiver = existing.sender
+            else:
+                return Response(
+                    {'detail': 'Wait for a rider to make an offer first.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         elif request.user.role == 'rider':
             receiver = job.customer
         else:
             return Response(
-                {'detail': 'You are not part of this job.'},
+                {'detail': 'You are not authorized to negotiate on this job.'},
                 status=status.HTTP_403_FORBIDDEN
-            )
-
-        if not receiver:
-            return Response(
-                {'detail': 'No rider assigned to negotiate with yet.'},
-                status=status.HTTP_400_BAD_REQUEST
             )
 
         # check no active pending negotiation exists
@@ -116,13 +117,13 @@ class NegotiationResponseView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        new_status = serializer.validated_data['status']
+        new_status         = serializer.validated_data['status']
         negotiation.status = new_status
         negotiation.save()
 
         # if accepted, update the job's estimated fare
         if new_status == 'accepted':
-            job = negotiation.job
+            job                = negotiation.job
             job.estimated_fare = negotiation.amount
             job.save()
 

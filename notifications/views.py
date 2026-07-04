@@ -3,147 +3,64 @@ from rest_framework.response    import Response
 from rest_framework             import status
 from rest_framework.permissions import IsAuthenticated
 
-from .models        import Negotiation
-from .serializers   import NegotiationSerializer, NegotiationCreateSerializer, NegotiationResponseSerializer
-from jobs.models    import DeliveryJob
+from .models        import Notification
+from .serializers   import NotificationSerializer
 
 
-class NegotiationCreateView(APIView):
+class NotificationListView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, job_id):
-        """Customer or rider initiates a fare negotiation on a job."""
-        try:
-            job = DeliveryJob.objects.get(id=job_id)
-        except DeliveryJob.DoesNotExist:
-            return Response(
-                {'detail': 'Job not found.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        # job must be pending to negotiate
-        if job.status != 'pending':
-            return Response(
-                {'detail': 'Can only negotiate on pending jobs.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # determine sender and receiver
-        if request.user == job.customer:
-            existing = Negotiation.objects.filter(job=job).order_by('-created_at').first()
-            if existing:
-                receiver = existing.sender
-            else:
-                return Response(
-                    {'detail': 'Wait for a rider to make an offer first.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        elif request.user.role == 'rider':
-            receiver = job.customer
-        else:
-            return Response(
-                {'detail': 'You are not authorized to negotiate on this job.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        # check no active pending negotiation exists
-        if Negotiation.objects.filter(job=job, status='pending').exists():
-            return Response(
-                {'detail': 'A negotiation is already pending for this job.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        serializer = NegotiationCreateSerializer(data=request.data)
-        if serializer.is_valid():
-            negotiation = Negotiation.objects.create(
-                job      = job,
-                sender   = request.user,
-                receiver = receiver,
-                amount   = serializer.validated_data['amount'],
-                note     = serializer.validated_data.get('note', ''),
-            )
-            return Response(
-                NegotiationSerializer(negotiation).data,
-                status=status.HTTP_201_CREATED
-            )
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-class NegotiationListView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, job_id):
-        """Get all negotiations for a specific job."""
-        try:
-            job = DeliveryJob.objects.get(id=job_id)
-        except DeliveryJob.DoesNotExist:
-            return Response(
-                {'detail': 'Job not found.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        negotiations = Negotiation.objects.filter(job=job).order_by('created_at')
-        serializer   = NegotiationSerializer(negotiations, many=True)
+    def get(self, request):
+        """Get all notifications for the logged in user."""
+        notifications = Notification.objects.filter(
+            user=request.user
+        ).order_by('-created_at')
+        serializer = NotificationSerializer(notifications, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
-class NegotiationResponseView(APIView):
+class NotificationReadView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def patch(self, request, negotiation_id):
-        """Receiver responds to a negotiation — accept, reject, or counter."""
+    def patch(self, request, notification_id):
+        """Mark a single notification as read."""
         try:
-            negotiation = Negotiation.objects.get(id=negotiation_id)
-        except Negotiation.DoesNotExist:
+            notification = Notification.objects.get(
+                id=notification_id, user=request.user
+            )
+            notification.is_read = True
+            notification.save()
             return Response(
-                {'detail': 'Negotiation not found.'},
+                {'detail': 'Notification marked as read.'},
+                status=status.HTTP_200_OK
+            )
+        except Notification.DoesNotExist:
+            return Response(
+                {'detail': 'Notification not found.'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # only the receiver can respond
-        if request.user != negotiation.receiver:
-            return Response(
-                {'detail': 'Only the receiver can respond to this negotiation.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
 
-        if negotiation.status != 'pending':
-            return Response(
-                {'detail': 'This negotiation has already been responded to.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+class NotificationReadAllView(APIView):
+    permission_classes = [IsAuthenticated]
 
-        serializer = NegotiationResponseSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        new_status         = serializer.validated_data['status']
-        negotiation.status = new_status
-        negotiation.save()
-
-        # if accepted, update the job's estimated fare
-        if new_status == 'accepted':
-            job                = negotiation.job
-            job.estimated_fare = negotiation.amount
-            job.save()
-
-        # if countered, create a new negotiation in reverse
-        if new_status == 'countered':
-            counter_amount = serializer.validated_data.get('amount')
-            if not counter_amount:
-                return Response(
-                    {'detail': 'Amount is required when countering.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            Negotiation.objects.create(
-                job      = negotiation.job,
-                sender   = request.user,
-                receiver = negotiation.sender,
-                amount   = counter_amount,
-                note     = serializer.validated_data.get('note', ''),
-            )
-
+    def patch(self, request):
+        """Mark all notifications as read."""
+        Notification.objects.filter(
+            user=request.user, is_read=False
+        ).update(is_read=True)
         return Response(
-            NegotiationSerializer(negotiation).data,
+            {'detail': 'All notifications marked as read.'},
             status=status.HTTP_200_OK
         )
+
+
+class UnreadCountView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Get count of unread notifications."""
+        count = Notification.objects.filter(
+            user=request.user, is_read=False
+        ).count()
+        return Response({'unread_count': count}, status=status.HTTP_200_OK)
